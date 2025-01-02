@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 
 	//"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 	//"syscall"
 
 	// "encoding/json"
-	"bufio"
+
 	"bytes"
 	"io"
 	"log"
@@ -23,8 +24,7 @@ import (
 
 	"time"
 
-	//"k8s.io/apimachinery/pkg/api/errors"
-	//apiv1 "k8s.io/api/core/v1"
+	coreV1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -65,44 +65,62 @@ func DescribePod(namespace string, name string) {
 }
 
 func writeToView(view *tview.TextView, writer tview.TextViewWriter, text string) {
-	fmt.Fprintln(writer, text)
+	fmt.Fprint(writer, text)
 	view.ScrollToEnd()
 }
 
 func LogPod(nodeinfo *nodeInfo, name string) {
 	nodeinfo.logging = true
-	go func(nodeinfo *nodeInfo) {
-		cmd := exec.Command("kubectl", "logs", "-f", name, "-n", nodeinfo.namespace)
-
-		stdout, err := cmd.StdoutPipe()
+	go func(nodeinfo *nodeInfo) error {
+		logOpts := coreV1.PodLogOptions{Follow: true}
+		req := clientset.CoreV1().Pods(nodeinfo.namespace).GetLogs(name, &logOpts)
+		podLogs, err := req.Stream(context.Background())
 		if err != nil {
-			log.Fatal(err)
+			log.Fatalf("Failed to get pod logs: %v", err)
 		}
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			log.Fatal(err)
-			log.Fatal(err)
+		fmt.Fprintln(logViewWriter, "0")
+		defer podLogs.Close()
+		fmt.Fprintln(logViewWriter, "2")
+		for {
+			if len(nodeinfo.execChannel) > 0 {
+				if <-nodeinfo.execChannel {
+					fmt.Fprintln(logViewWriter, "Got DIE!!!")
+					nodeinfo.logging = false
+					logOpts.Follow = false
+					break
+				}
+			}
 		}
-
-		err = cmd.Start()
-		if err != nil {
-			log.Fatal(err)
-		}
-		merged := io.MultiReader(stdout, stderr)
-		scanner := bufio.NewScanner(merged)
+		fmt.Fprintln(logViewWriter, "1")
 
 		ch := make(chan string, 2)
 		go func(ch chan string) {
-			writeToView(logInfo, logViewWriter, "About to scan.")
-			for scanner.Scan() {
-			    ch <- scanner.Text()
-			}
-			if err := scanner.Err(); err != nil {
-				writeToView(logInfo, logViewWriter, fmt.Sprintln("Error reading output: %v", err))
+			for i := 0; true; i++ {
+				buf := make([]byte, 200000)
+				numBytes, err := podLogs.Read(buf)
+				writeToView(logInfo, logViewWriter, fmt.Sprintln("Read", numBytes, " bytes", i))
+				ch <- string(buf[:numBytes])
+				if err == io.EOF {
+					writeToView(logInfo, logViewWriter, "EOF")
+					break
+				}
+				if numBytes == 0 {
+					if nodeinfo.logging == false {
+						break
+					} else {
+						writeToView(logInfo, logViewWriter, "SLEEP")
+						time.Sleep(time.Second)
+						continue
+					}
+				}
+				if err != nil {
+					writeToView(logInfo, logViewWriter, fmt.Sprintln("Error reading output:", err))
+					break
+				}
 			}
 		}(ch)
 
-		for i := 0; true; i++ {
+		for {
 			if len(ch) > 0 {
 				scanstr := <-ch
 				writeToView(detailsInfo, podViewWriter, scanstr)
@@ -110,19 +128,14 @@ func LogPod(nodeinfo *nodeInfo, name string) {
 			if len(nodeinfo.execChannel) > 0 {
 				if <-nodeinfo.execChannel {
 					fmt.Fprintln(logViewWriter, "Got DIE!!!")
-					cmd.Process.Signal(os.Kill)
 					nodeinfo.logging = false
 					break
 				}
+			} else {
+				time.Sleep(time.Second)
 			}
-			// } else {
-			// 	time.Sleep(time.Second)
-			// }
 		}
-
-		cmd.Wait()
-		fmt.Fprintln(logViewWriter, "Killed")
-
+		return nil
 	}(nodeinfo)
 	fmt.Fprintln(logViewWriter, "EXIT Logpod")
 }
@@ -161,11 +174,11 @@ func changeNodeHandler(node *tview.TreeNode) {
 			}
 			for _, pod := range pods.Items {
 				nInfo := nodeInfo{
-					namespace: namespace, 
-					name: pod.Name, 
-					nodeType: "pod", 
-					execChannel: make(chan bool, 3), 
-					logging: false,
+					namespace:   namespace,
+					name:        pod.Name,
+					nodeType:    "pod",
+					execChannel: make(chan bool, 3),
+					logging:     false,
 				}
 				AddChildNode(node, pod.Name, true, nInfo, tcell.ColorGreen)
 			}
@@ -238,6 +251,9 @@ func PopulateTree() *tview.TreeView {
 	if err != nil {
 		log.Fatal(err)
 	}
+	sort.Slice(namespaces.Items[:], func(i, j int) bool {
+		return namespaces.Items[i].Name < namespaces.Items[j].Name
+	})
 
 	for _, ns := range namespaces.Items {
 		node := AddChildNode(root, ns.Name, true, nodeInfo{namespace: ns.Name, nodeType: "Namespace"}, tcell.ColorBlue)
@@ -269,10 +285,12 @@ func init() {
 		log.Fatal(err)
 	}
 	detailsInfo = tview.NewTextView()
+	detailsInfo.SetScrollable(true)
 	podViewWriter = detailsInfo.BatchWriter()
 	defer podViewWriter.Close()
 	podViewWriter.Clear()
 	logInfo = tview.NewTextView()
+	logInfo.SetScrollable(true)
 	logViewWriter = logInfo.BatchWriter()
 	defer logViewWriter.Close()
 	logViewWriter.Clear()
