@@ -40,11 +40,14 @@ type Node struct {
 	Expanded	bool
 	Children	[]*Node
 	LineNumber  int
-	Color	   int
+	Color	    int
+	OpenSymbol  string
+	Symbol      string
 }
 
 type Tree struct {
 	Root *Node
+	charWidth int
 }
 
 type nodeInfo struct {
@@ -55,11 +58,39 @@ type nodeInfo struct {
 	logging	 bool
 }
 
+const podSymbol = "\ueba2"
+const nsSymbol = "\uea8b"
+const folderOpenSymbol = "\uf07c"
+const folderSymbol = "\uf07b"
+
 var kTree Tree
 var clientset *kubernetes.Clientset
 var logs []string
 var selectedNode nodeInfo
 var gui *gocui.Gui
+
+func clearSelection(node *Node) {
+	node.Selected = false
+	for _, child := range node.Children {
+		clearSelection(child);
+	}
+}
+
+func selectNode(node *Node, line int) {
+	node.Selected = false
+	for _, child := range node.Children {
+		selectNode(child, line);
+	}
+}
+
+func (t *Tree) SelectNode(line int) {
+	if t.Root == nil {
+		return
+	}
+	clearSelection(t.Root)
+
+	selectNode(t.Root, line)
+}
 
 // RenderAsText renders the tree as text
 func (t *Tree) RenderAsText() string {
@@ -68,7 +99,7 @@ func (t *Tree) RenderAsText() string {
 	}
 	resetTreeLineNumbers(t.Root)
 	lineNum := 1
-	return renderNode(t.Root, "", true, &lineNum)
+	return renderNode(t.Root, "", true, t.charWidth, &lineNum)
 }
 
 func resetTreeLineNumbers(node *Node) {
@@ -97,37 +128,77 @@ func (t *Tree) processLineNumberEvent(line int) {
 	tryNode(t.Root, line)
 }
 
+func setBackgroundColorForLine(g *gocui.Gui, v *gocui.View, lineNumber int, color gocui.Attribute) error {
+    lines := strings.Split(v.Buffer(), "\n")
+    if lineNumber < 0 || lineNumber >= len(lines) {
+        return fmt.Errorf("invalid line number")
+    }
 
-func renderNode(node *Node, prefix string, isLast bool, line *int) string {
+    v.Clear()
+    v.SetWritePos(0, 0)
+
+    for i, line := range lines {
+        if i == lineNumber {
+            v.SelBgColor = color
+            fmt.Fprintln(v, line)
+			v.SelBgColor = gocui.ColorDefault
+        } else {
+            fmt.Fprintln(v, line)
+        }
+    }
+
+    return nil
+}
+
+func renderNode(node *Node, prefix string, isLast bool, charWidth int, line *int) string {
 	var result strings.Builder
+	resetCode := "\x1b[0m"
+	backgroundColor := fmt.Sprintf("%s%dm", "\x1b[48;5;", 237)
+	nodeColor := fmt.Sprintf("%s%dm", "\x1b[38;5;", node.Color)
 
 	//Write the current node
-	result.WriteString(prefix)
-	if isLast {
-		result.WriteString("└─ ")
-	} else {
-		result.WriteString("├─ ")
+	//result.WriteString(prefix)
+	treePrefix := prefix
+	if len(node.Children) > 0 {
+		if (node.Expanded) {
+			treePrefix += "─ "
+		} else {
+			treePrefix += "+ "
+		}
 	}
+	if node.Expanded {
+		treePrefix += node.OpenSymbol
+	} else {
+		treePrefix += node.Symbol
+	}
+	treePrefix += " "
+
 	node.LineNumber = *line
-	result.WriteString(fmt.Sprintf("\033[3%d;1m%s\033[0m\n", node.Color, node.Name))
+
+	var spaces string
+	if charWidth - len(treePrefix) - len(node.Name) > 0 {
+		spaces = strings.Repeat(" ", charWidth)
+	} else {
+		spaces = ""
+	}
+
+	if node.Selected {
+		result.WriteString(fmt.Sprintf("%s%s%s%s%s%s\n", backgroundColor, treePrefix, nodeColor, node.Name, spaces, resetCode))
+	} else {
+		result.WriteString(fmt.Sprintf("%s%s%s%s%s\n", treePrefix, nodeColor, node.Name, spaces, resetCode))
+	}
 	*line++;
 	if node.Expanded {
 
-		descPrefix := prefix
-		if isLast {
-			descPrefix += "   "
-		} else {
-			descPrefix += "│  "
-		}
 		// Recursively render child nodes
 		for i, child := range node.Children {
 			newPrefix := prefix
-			if isLast {
+			//if isLast {
 				newPrefix += "   "
-			} else {
-				newPrefix += "│  "
-			}
-			nodeText := renderNode(child, newPrefix, i == len(node.Children)-1, line)
+			// } else {
+			// 	newPrefix += "│  "
+			// }
+			nodeText := renderNode(child, newPrefix, i == len(node.Children)-1, charWidth, line)
 			result.WriteString(nodeText)
 		}
 	}
@@ -179,8 +250,11 @@ func logMessage(msg string) {
 }
 
 func layout(g *gocui.Gui) error {
-	_, h :=	g.Size()
-	if v, err := g.SetView("log", 250, 0, 300, h, 0); err != nil {
+	maxX, maxY := g.Size()
+	detailsX := (maxX * 15) / 100
+	logX  := (maxX * 80) / 100
+	kTree.charWidth = detailsX - 2
+	if v, err := g.SetView("log", logX, 0, maxX-1, maxY-1, 0); err != nil {
 		v.SelFgColor = gocui.ColorBlack
 		v.SelBgColor = gocui.ColorGreen
 		v.Autoscroll = true
@@ -191,7 +265,7 @@ func layout(g *gocui.Gui) error {
 		}
 		drawStrings(g, "log", logs[:])
 	}
-	if v, err := g.SetView("tree", 0, 0, 50, h, 0); err != nil {
+	if v, err := g.SetView("tree", 0, 0, detailsX - 1, maxY-1, 0); err != nil {
 		v.SelFgColor = gocui.ColorBlack
 		v.SelBgColor = gocui.ColorGreen
 		//v.Autoscroll = true
@@ -202,7 +276,7 @@ func layout(g *gocui.Gui) error {
 		}
 		drawTree(g)
 	}
-	if v, err := g.SetView("details", 50, 0, 250, h, 0); err != nil {
+	if v, err := g.SetView("details", detailsX, 0, logX-1, maxY-1, 0); err != nil {
 		v.SelFgColor = gocui.ColorBlack
 		v.SelBgColor = gocui.ColorGreen
 		v.Autoscroll = true
@@ -212,6 +286,7 @@ func layout(g *gocui.Gui) error {
 			return err
 		}
 	}
+	//logMessage(fmt.Sprintf("MX,MY: %d,%d", maxX, maxY))
 
 	return nil
 }
@@ -309,10 +384,12 @@ func LogPod(nodeinfo *nodeInfo) {
 
 func changeNodeHandler(node *Node) {
 	clearView(gui, "details")
+	clearSelection(kTree.Root)
 
 	nodeinfo := node.Data.(nodeInfo)
 	namespace := nodeinfo.namespace
 	children := node.Children
+	node.Selected = true
 	logMessage(fmt.Sprintf("CHG: type: %s, %s, %s, %s, %t", nodeinfo.nodeType, node.Name, selectedNode.name, selectedNode.namespace, selectedNode.logging))
 	if selectedNode.logging {
 		logMessage("DIE!")
@@ -338,7 +415,7 @@ func changeNodeHandler(node *Node) {
 					execChannel: make(chan bool, 3),
 					logging:	 false,
 				}
-				addNode(node, pod.Name, "", 4, nInfo, false, false)
+				addNode(node, pod.Name, "", 179, nInfo, podSymbol, podSymbol, false, false)
 			}
 		} else {
 			node.Expanded = !node.Expanded
@@ -351,7 +428,7 @@ func changeNodeHandler(node *Node) {
 				log.Fatal(err)
 			}
 			for _, configmap := range configmaps.Items {
-				addNode(node, configmap.Name, "", 5, nodeInfo{namespace: namespace, nodeType: "configmap"}, false, false) 
+				addNode(node, configmap.Name, "", 27, nodeInfo{namespace: namespace, nodeType: "configmap"}, "", "", false, false) 
 			}
 		} else {
 			node.Expanded = !node.Expanded
@@ -364,7 +441,7 @@ func changeNodeHandler(node *Node) {
 				log.Fatal(err)
 			}
 			for _, service := range services.Items {
-				addNode(node, service.Name, "", 6, nodeInfo{namespace: namespace, nodeType: "service"}, false, false) 
+				addNode(node, service.Name, "", 87, nodeInfo{namespace: namespace, nodeType: "service"}, "", "", false, false) 
 			}
 		} else {
 			node.Expanded = !node.Expanded
@@ -380,6 +457,14 @@ func changeNodeHandler(node *Node) {
 	case "service":
 	}
 	selectedNode = nodeinfo
+
+	// tv, err := gui.View("tree")
+	// if err != nil {
+	// 	log.Fatal("failed to get textView", err)
+	// }
+
+	// if err := setBackgroundColorForLine(gui, tv, 5, gocui.ColorYellow); err != nil {
+ //    }
 }
 
 // func selectNodeHandler(node *tview.TreeNode) {
@@ -396,16 +481,18 @@ func changeNodeHandler(node *Node) {
 //	 selectedNode = nodeinfo
 // }
 
-func addNode(node *Node, name string, description string, color int, data interface{}, selected bool, expanded bool) *Node {
+func addNode(node *Node, name string, description string, color int, data interface{}, symbol string, openSymbol string, selected bool, expanded bool) *Node {
 
 	childNode := Node{
-		Name:		name,
+		Name:		 name,
 		Description: description,
-		Data:		data,
-		Color:	   color,
-		Selected:	selected,
-		Expanded:	expanded,
-		Children:	[]*Node{},
+		Data:		 data,
+		Color:	     color,
+		Selected:	 selected,
+		Expanded:	 expanded,
+		Symbol:      symbol,
+		OpenSymbol:  openSymbol,
+		Children:	 []*Node{},
 	}
 	if node != nil {
 		node.Children = append(node.Children, &childNode)
@@ -423,13 +510,13 @@ func PopulateTree() Tree {
 		return namespaces.Items[i].Name < namespaces.Items[j].Name
 	})
 	
-	root := addNode(nil, "Namespaces", "", 1, nodeInfo{namespace: "", nodeType: "Namespaces"}, false, true)
+	root := addNode(nil, "Namespaces", "", 1, nodeInfo{namespace: "", nodeType: "Namespaces"}, "", "", false, true)
 
 	for _, ns := range namespaces.Items {
-		nsNode := addNode(root, ns.Name, "", 1, nodeInfo{namespace: ns.Name, nodeType: "Namespace"}, false, true)
-		addNode(nsNode, "Pods", "", 2, nodeInfo{namespace: ns.Name, nodeType: "Pods"}, false, true)
-		addNode(nsNode, "ConfigMaps", "", 3, nodeInfo{namespace: ns.Name, nodeType: "ConfigMaps"}, false, false)
-		addNode(nsNode, "Services", "", 4, nodeInfo{namespace: ns.Name, nodeType: "Services"}, false, false)
+		nsNode := addNode(root, ns.Name, "", 1, nodeInfo{namespace: ns.Name, nodeType: "Namespace"}, nsSymbol, nsSymbol, false, true)
+		addNode(nsNode, "Pods", "", 2, nodeInfo{namespace: ns.Name, nodeType: "Pods"}, folderSymbol , folderOpenSymbol, false, true)
+		addNode(nsNode, "ConfigMaps", "", 3, nodeInfo{namespace: ns.Name, nodeType: "ConfigMaps"}, folderSymbol , folderOpenSymbol, false, false)
+		addNode(nsNode, "Services", "", 4, nodeInfo{namespace: ns.Name, nodeType: "Services"}, folderSymbol , folderOpenSymbol, false, false)
 		logMessage("populated " + ns.Name)
 
 	}
@@ -526,7 +613,7 @@ func initKeybindings() error {
 
 func Run() error {
 	var err error
-	gui, err = gocui.NewGui(gocui.OutputNormal, true)
+	gui, err = gocui.NewGui(gocui.Output256, true)
 	if err != nil {
 		log.Fatal(err)
 	}
