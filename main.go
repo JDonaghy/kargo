@@ -5,22 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"sort"
-	"strings"
 
-	//"os"
 	"path/filepath"
-
-	//"runtime"
-	//"syscall"
-
-	// "encoding/json"
 
 	"bytes"
 	"io"
 	"log"
 	"os/exec"
-
-	//"time"
 
 	coreV1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,10 +19,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 
-	//"io/ioutil"
-	"kargo/gocuitree"
-
 	"github.com/awesome-gocui/gocui"
+
+	"kargo/texttree"
 )
 
 type nodeInfo struct {
@@ -50,33 +40,11 @@ const (
 )
 
 var (
-	kTree     *gocuitree.Tree
+	kTree     *texttree.Tree
 	clientset *kubernetes.Clientset
 	logs      []string
 	gui       *gocui.Gui
 )
-
-func setBackgroundColorForLine(g *gocui.Gui, v *gocui.View, lineNumber int, color gocui.Attribute) error {
-	lines := strings.Split(v.Buffer(), "\n")
-	if lineNumber < 0 || lineNumber >= len(lines) {
-		return fmt.Errorf("invalid line number")
-	}
-
-	v.Clear()
-	v.SetWritePos(0, 0)
-
-	for i, line := range lines {
-		if i == lineNumber {
-			v.SelBgColor = color
-			fmt.Fprintln(v, line)
-			v.SelBgColor = gocui.ColorDefault
-		} else {
-			fmt.Fprintln(v, line)
-		}
-	}
-
-	return nil
-}
 
 func drawTree(g *gocui.Gui) error {
 	tv, err := g.View("tree")
@@ -229,7 +197,7 @@ func LogPod(nodeinfo *nodeInfo) {
 	}(nodeinfo)
 }
 
-func changeNodeHandler(node *gocuitree.Node) {
+func changeNodeHandler(node *texttree.Node) {
 	clearView(gui, "details")
 	kTree.ClearSelection()
 
@@ -319,7 +287,7 @@ func changeNodeHandler(node *gocuitree.Node) {
 	kTree.SelectedNode = node
 }
 
-func PopulateTree() *gocuitree.Tree {
+func PopulateTree() *texttree.Tree {
 	namespaces, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 
 	if err != nil {
@@ -329,7 +297,7 @@ func PopulateTree() *gocuitree.Tree {
 		return namespaces.Items[i].Name < namespaces.Items[j].Name
 	})
 
-	newTree := gocuitree.NewTree("Namespaces", 1, nodeInfo{namespace: "", nodeType: "Namespaces"}, "", "", false, true)
+	newTree := texttree.NewTree("Namespaces", 1, nodeInfo{namespace: "", nodeType: "Namespaces"}, "", "", false, true)
 
 	for _, ns := range namespaces.Items {
 		nsNode := newTree.Root.AddChildNode(

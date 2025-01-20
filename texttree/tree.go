@@ -1,4 +1,4 @@
-package gocuitree
+package texttree
 
 type Tree struct {
 	Root         *Node

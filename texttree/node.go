@@ -1,4 +1,4 @@
-package gocuitree
+package texttree
 
 import (
 	"fmt"
